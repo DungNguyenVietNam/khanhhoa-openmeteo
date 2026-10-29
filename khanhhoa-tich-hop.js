@@ -319,15 +319,22 @@ function taoDiem(L, map, t) {
 
 function chuGiai(rk, t) {
   const luc = new Date(luoi?.fetchedAt ?? Date.now()).toLocaleString('vi-VN');
-  let html = '';
-  // Vỏ đã có sẵn thang mưa trong Chú giải, nên chỉ thêm thang của lớp KHÁC mưa.
-  if (rk && rk !== 'precipitation_sum') html += legendFor(rk, { period: nhanNgay(t) });
-  html += `<div style="font-size:11.5px;line-height:1.5;color:#64748b;margin-top:8px;
-      padding-top:8px;border-top:1px solid #e2e8f0">
-      Số mô hình dự báo, không phải số đo trạm<br>Lấy lúc ${luc}<br>
-      Nguồn: <a href="https://open-meteo.com/" target="_blank" rel="noopener"
-      style="color:inherit">Open-Meteo</a> · CC-BY 4.0</div>`;
-  pam.setLegendExtra(html);
+
+  // legendFor() đã tự kèm phần nguồn và dòng "không phải số đo trạm". Nếu dùng
+  // nó rồi mà còn nối thêm khối nguồn của mình thì chú giải bị lặp hai lần.
+  if (rk && rk !== 'precipitation_sum') {
+    pam.setLegendExtra(legendFor(rk, { issuedAt: luoi?.fetchedAt, period: nhanNgay(t) }));
+    return;
+  }
+
+  // Lớp mưa dùng thang có sẵn của vỏ, nên ở đây chỉ cần phần nguồn.
+  // Ghi công CC-BY 4.0 là BẮT BUỘC theo giấy phép Open-Meteo, đừng bỏ.
+  pam.setLegendExtra(
+    `<div style="font-size:11.5px;line-height:1.5;color:#64748b;margin-top:8px;` +
+    `padding-top:8px;border-top:1px solid #e2e8f0">` +
+    `Số mô hình dự báo, không phải số đo trạm<br>Lấy lúc ${luc}<br>` +
+    `Nguồn: <a href="https://open-meteo.com/" target="_blank" rel="noopener"` +
+    ` style="color:inherit">Open-Meteo</a> · CC-BY 4.0</div>`);
 }
 
 /* ========================= khởi động ========================= */
