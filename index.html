@@ -1,0 +1,1043 @@
+<!doctype html>
+<!--
+  ============================================================================
+  VỎ GIAO DIỆN — Bản đồ giám sát hồ chứa thuỷ lợi tỉnh Khánh Hoà
+  Bám thiết kế PAM CEMS (xem brief/PAM-CEMS-DESIGN.md).
+
+  File này CHỈ là vỏ giao diện: sidebar + vùng bản đồ + cụm panel.
+  Mọi số liệu trong trang là DỮ LIỆU MẪU TĨNH, không gọi API.
+  Việc nối dữ liệu thật (Open-Meteo, trạm quan trắc) do phần tích hợp làm sau,
+  thông qua hợp đồng window.__pam ở dưới.
+
+  ---------------------------------------------------------------------------
+  HỢP ĐỒNG window.__pam  (dành cho phần tích hợp dữ liệu)
+  ---------------------------------------------------------------------------
+  window.__pam = {
+    map,                  // đối tượng bản đồ đang dùng. KHÔNG đọc ngay khi
+                          // script của bạn chạy — bản đồ nạp bất đồng bộ.
+                          // Hãy chờ onReady() hoặc kiểm tra ready === true.
+    engine,               // 'google' | 'leaflet' — cho biết map là loại nào,
+                          // để chọn google-adapter.js hay leaflet-adapter.js
+    ready,                // boolean: bản đồ đã tạo xong chưa
+    onReady(fn),          // gọi fn(map, engine) khi bản đồ sẵn sàng. Nếu đã
+                          // sẵn sàng rồi thì gọi ngay. Trả về hàm huỷ đăng ký.
+    bbox,                 // { latMin, latMax, lonMin, lonMax } khung Khánh Hoà
+    reservoirs,           // mảng 7 hồ mẫu: { code, name, lat, lon, ... }
+
+    // --- lớp dự báo mưa 24h (checkbox "Dự báo mưa 24h (Open-Meteo)") ---
+    setForecastLayer(fn), // ĐĂNG KÝ bộ dựng lớp. fn có dạng:
+                          //     fn(map, { visible, engine }) -> layer | null
+                          // Trả về đối tượng CÓ .setMap(null) để gỡ lớp
+                          // (đúng kiểu mà google-adapter/leaflet-adapter trả).
+                          // Vỏ sẽ gọi fn khi người dùng bật checkbox, và gọi
+                          // layer.setMap(null) khi tắt. Nếu fn trả Promise,
+                          // vỏ sẽ chờ và hiện trạng thái "đang tải".
+                          // Nếu fn ném lỗi, vỏ hiện thông báo lỗi DÍNH
+                          // (không hỏng âm thầm) và tự bỏ chọn checkbox.
+    refreshForecast(),    // vẽ lại lớp dự báo theo trạng thái checkbox hiện tại
+    isForecastOn(),       // boolean: checkbox dự báo đang bật hay không
+
+    setStatus(text, isError), // ghi dòng trạng thái dưới bản đồ
+    setLegendExtra(html),     // chèn HTML vào cuối khối Chú giải (ví dụ dòng
+                              // ghi công "Nguồn: Open-Meteo · CC-BY 4.0")
+    onBasemapChange(fn),  // fn(id) khi đổi bản đồ nền: 'basic'|'terrain'|
+                          // 'satellite'|'satellite-labels'
+    onLayerToggle(fn),    // fn(id, checked) cho các lớp ở khối "Lớp dữ liệu khác":
+                          // 'hydro' | 'reservoir' | 'admin' | 'forecast-rain'
+    onLabelsToggle(fn),   // fn(checked) khi bật/tắt "Hiển thị tên điểm"
+  }
+
+  Nhắc: theo brief, mọi thứ từ Open-Meteo là DỰ BÁO MÔ HÌNH → marker phải
+  viền NÉT ĐỨT, và chú giải phải ghi rõ nguồn CC-BY 4.0.
+  ---------------------------------------------------------------------------
+
+  CHẠY THỬ KHÔNG CẦN KHOÁ: đặt USE_LEAFLET = true (mặc định) để dùng nền
+  OpenStreetMap qua Leaflet. Khi có khoá Google Maps thì điền GOOGLE_MAPS_KEY
+  và đặt USE_LEAFLET = false.
+
+  LƯU Ý KHI SỬA FILE: máy chủ tĩnh đơn giản không gửi header chống cache.
+  Sửa mà không thấy đổi thì tải lại cứng (Cmd+Shift+R) hoặc thêm ?v=2.
+  ============================================================================
+-->
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PAM CEMS · Bản đồ giám sát hồ chứa Khánh Hoà</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+<style>
+  /* ---------- design token lấy từ brief ---------- */
+  :root{
+    --emerald:#10b981; --emerald-l:#34d399; --emerald-d:#059669;
+    --navy:#132a3a; --navy-d:#0e2130; --navy-l:#1c3a4e;
+    --nav-text:#cfe0e8; --nav-muted:#8ba6b6;
+
+    --ink:#111827; --ink-2:#374151; --muted:#6b7280;
+    --line:#e5e7eb; --page:#eef2f4;
+
+    --st-total:#2196f3; --st-ok:#22c55e; --st-w1:#f97316;
+    --st-w2:#ef4444; --st-w3:#a855f7; --st-nodata:#111827;
+
+    /* bậc mưa — giữ ĐÚNG mã màu trong rain-class.js để sau này khớp lớp raster */
+    --rain-0:#9aa7ad; --rain-1:#4fc3f7; --rain-2:#43a047;
+    --rain-3:#fb8c00; --rain-4:#e53935;
+
+    --shadow:0 1px 4px rgba(16,30,40,.14), 0 4px 14px rgba(16,30,40,.10);
+    --radius:8px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; display:flex; background:var(--page); color:var(--ink);
+    font:14px/1.45 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont,
+         'Segoe UI', system-ui, sans-serif;
+  }
+  button,input,select{font:inherit}
+
+  /* ================= SIDEBAR (tĩnh) ================= */
+  .sidebar{
+    flex:0 0 232px; background:var(--navy); color:var(--nav-text);
+    display:flex; flex-direction:column; overflow-y:auto;
+  }
+  .brand{display:flex;align-items:center;gap:9px;padding:14px 16px;
+         border-bottom:1px solid rgba(255,255,255,.08)}
+  .brand .logo{width:30px;height:30px;border-radius:7px;flex:0 0 30px;
+    background:linear-gradient(140deg,var(--emerald-l),var(--emerald-d));
+    display:grid;place-items:center;font-size:16px}
+  .brand b{font-size:14.5px;letter-spacing:.02em;display:block;line-height:1.2}
+  .brand small{font-size:10.5px;color:var(--nav-muted)}
+  .nav{padding:8px 0;flex:1 1 auto}
+  .nav-sec{font-size:10px;letter-spacing:.09em;text-transform:uppercase;
+           color:var(--nav-muted);padding:12px 16px 5px}
+  .nav a{display:flex;align-items:center;gap:9px;padding:7.5px 16px;
+         color:var(--nav-text);text-decoration:none;font-size:13.2px;
+         border-left:3px solid transparent}
+  .nav a .ic{width:16px;text-align:center;opacity:.85;font-size:13px}
+  .nav a:hover{background:rgba(255,255,255,.05)}
+  .nav a.sub{padding-left:38px;font-size:12.8px;color:#b9cfdb}
+  .nav a.on{background:rgba(16,185,129,.14);color:var(--emerald-l);
+            border-left-color:var(--emerald);font-weight:500}
+  .nav .grp-h{display:flex;align-items:center;gap:9px;padding:7.5px 16px;
+    font-size:13.2px;color:var(--nav-text);border-left:3px solid transparent}
+  .nav .grp-h .caret{margin-left:auto;font-size:10px;color:var(--nav-muted)}
+  .side-foot{padding:11px 16px;border-top:1px solid rgba(255,255,255,.08);
+             font-size:10.5px;color:var(--nav-muted)}
+
+  /* ================= KHUNG GIỮA ================= */
+  .main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column}
+  .topbar{flex:0 0 auto;background:#fff;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:10px;padding:0 14px;height:48px}
+  .crumb{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted)}
+  .crumb b{color:var(--ink);font-weight:600}
+  .topbar .spacer{flex:1 1 auto}
+  .pill{border:1px solid var(--line);border-radius:14px;padding:3px 10px;
+        font-size:12px;color:var(--ink-2);background:#f8fafb}
+  .who{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-2)}
+  .ava{width:26px;height:26px;border-radius:50%;background:var(--emerald);
+       color:#fff;display:grid;place-items:center;font-size:12px;font-weight:600}
+
+  /* vùng bản đồ + các panel nổi đặt tuyệt đối lên trên */
+  .stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
+  #map{position:absolute;inset:0;background:#dfe7ea}
+  .leaflet-container{background:#dfe7ea;font-family:inherit}
+
+  /* ================= PANEL NỔI ================= */
+  .panel{
+    background:#fff;border-radius:var(--radius);box-shadow:var(--shadow);
+    overflow:hidden; pointer-events:auto;
+  }
+  .p-head{display:flex;align-items:center;gap:8px;padding:9px 11px;
+          border-bottom:1px solid var(--line);background:#fff}
+  .p-head h2{margin:0;font-size:12.5px;font-weight:600;letter-spacing:.01em}
+  .p-head .collapse{
+    margin-left:auto;width:22px;height:22px;flex:0 0 22px;border:1px solid var(--line);
+    background:#fff;border-radius:5px;color:var(--ink-2);cursor:pointer;
+    display:grid;place-items:center;font-size:13px;line-height:1
+  }
+  .p-head .collapse:hover{background:#f3f6f7;color:var(--emerald-d)}
+  .p-body{padding:10px 11px}
+  .panel.collapsed .p-body{display:none}
+  .panel.collapsed .p-head{border-bottom:0}
+
+  /* panel trái */
+  .left-dock{position:absolute;top:12px;left:12px;width:330px;z-index:500;
+             max-height:calc(100% - 24px);display:flex;flex-direction:column}
+  .left-dock .panel{display:flex;flex-direction:column;min-height:0}
+  .left-dock .p-body{overflow-y:auto}
+
+  /* cụm panel phải */
+  .right-dock{position:absolute;top:12px;right:12px;width:268px;z-index:500;
+    display:flex;flex-direction:column;gap:10px;
+    max-height:calc(100% - 24px);overflow-y:auto;padding-right:2px}
+  /* Không cho panel co lại. Mặc định flex-shrink:1 khiến chúng bị nén cho vừa
+     chiều cao dock, mà .panel lại overflow:hidden nên nội dung bị CẮT IM LẶNG
+     thay vì dock sinh thanh cuộn. */
+  .right-dock > .panel{flex:0 0 auto}
+  /* Thanh cuộn mảnh, đỡ chiếm chỗ trên panel hẹp */
+  .right-dock::-webkit-scrollbar{width:8px}
+  .right-dock::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
+  .right-dock::-webkit-scrollbar-thumb:hover{background:#94a3b8}
+  /* Phần chú giải thêm cũng có thể dài — cho nó tự cuộn */
+  #legendExtra{max-height:230px;overflow-y:auto}
+
+  /* ---------- tab ---------- */
+  .tabs{display:flex;border-bottom:1px solid var(--line);background:#fafbfc}
+  .tabs button{flex:1 1 0;padding:8px 4px;background:none;border:0;cursor:pointer;
+    font-size:12.2px;color:var(--muted);border-bottom:2px solid transparent}
+  .tabs button:hover{color:var(--ink-2)}
+  .tabs button[aria-selected=true]{color:var(--emerald-d);font-weight:600;
+    border-bottom-color:var(--emerald);background:#fff}
+  .tabpane[hidden]{display:none}
+
+  /* ---------- điều khiển nhỏ ---------- */
+  .sw-row{display:flex;align-items:center;gap:9px;padding:4.5px 0;font-size:12.8px;
+          cursor:pointer}
+  .sw-row span.t{flex:1 1 auto}
+  .sw{appearance:none;width:34px;height:19px;border-radius:19px;background:#cbd5db;
+      position:relative;cursor:pointer;flex:0 0 34px;transition:background .15s}
+  .sw::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;
+    border-radius:50%;background:#fff;transition:transform .15s;
+    box-shadow:0 1px 2px rgba(0,0,0,.25)}
+  .sw:checked{background:var(--emerald)}
+  .sw:checked::after{transform:translateX(15px)}
+  .chk,.rad{accent-color:var(--emerald);width:15px;height:15px;flex:0 0 15px;cursor:pointer}
+  .opt{display:flex;align-items:center;gap:9px;padding:4.5px 0;font-size:12.8px;cursor:pointer}
+  .hr{height:1px;background:var(--line);margin:9px -11px}
+  .sect-t{font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+          color:var(--muted);margin:2px 0 6px;font-weight:600}
+  .search{width:100%;padding:6.5px 9px;border:1px solid var(--line);border-radius:6px;
+          font-size:12.5px;color:var(--ink);background:#fff}
+  .search:focus{outline:2px solid rgba(16,185,129,.35);outline-offset:-1px;border-color:var(--emerald)}
+  .hint{font-size:11px;color:var(--muted);margin:6px 0 0}
+
+  /* ---------- tổng quan trạng thái ---------- */
+  .stat-row{display:flex;align-items:center;gap:8px;padding:3.5px 0;font-size:12.8px}
+  .dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px}
+  .stat-row .n{margin-left:auto;font-weight:600;font-variant-numeric:tabular-nums}
+
+  /* ---------- bảng chi tiết ---------- */
+  .tw{overflow-x:auto;margin:0 -11px}
+  table.det{border-collapse:collapse;width:100%;font-size:11.6px;min-width:520px}
+  table.det th,table.det td{padding:5px 7px;border-bottom:1px solid var(--line);
+    text-align:right;white-space:nowrap}
+  table.det th{background:#f7f9fa;color:var(--muted);font-weight:600;
+    position:sticky;top:0;font-size:10.6px;text-transform:uppercase;letter-spacing:.03em}
+  table.det th:first-child,table.det td:first-child{text-align:left}
+  table.det td.cap{color:#0e7490}
+  table.det td.lvl{color:#1d4ed8}
+  table.det td.qin{color:#047857}
+  table.det td.qout{color:#b45309}
+  table.det td.st{font-weight:600}
+
+  /* ---------- tab Giám sát ---------- */
+  .grp{border:1px solid var(--line);border-radius:6px;margin-bottom:7px;overflow:hidden}
+  .grp>summary{list-style:none;cursor:pointer;padding:7px 9px;background:#f7f9fa;
+    font-size:12.2px;font-weight:600;display:flex;align-items:center;gap:7px}
+  .grp>summary::-webkit-details-marker{display:none}
+  .grp>summary .caret{margin-left:auto;font-size:10px;color:var(--muted)}
+  .grp[open]>summary .caret{transform:rotate(180deg)}
+  .par{display:flex;align-items:center;gap:7px;padding:5px 9px;font-size:12.3px;
+       border-top:1px solid var(--line)}
+  .par .nm{flex:1 1 auto;color:var(--ink-2)}
+  .par .v{font-weight:600;color:#1d4ed8;font-variant-numeric:tabular-nums}
+  .par .ic{opacity:.75;font-size:12px;width:15px;text-align:center}
+
+  /* ---------- tab Thông báo ---------- */
+  .card{background:#fff;border:1px solid var(--line);border-radius:7px;
+        box-shadow:0 1px 3px rgba(16,30,40,.08);padding:9px 10px;margin-bottom:8px}
+  .card .ttl{display:flex;align-items:flex-start;gap:8px}
+  .card .ttl b{font-size:12.8px}
+  .badge{margin-left:auto;flex:0 0 auto;background:#fee2e2;color:#b91c1c;
+    border:1px solid #fecaca;border-radius:11px;padding:1px 8px;font-size:10.5px;font-weight:600}
+  .card p{margin:5px 0 0;font-size:12px;color:var(--ink-2)}
+  .card time{display:block;margin-top:5px;font-size:10.8px;color:var(--muted)}
+
+  /* ---------- chú giải ---------- */
+  #legendBody{max-height:208px;overflow-y:auto}
+  .lg-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12.2px;font-weight:500}
+  .lg-row svg{flex:0 0 15px}
+  .credit{font-size:10.6px;color:var(--muted);margin:8px 0 0;border-top:1px dashed var(--line);
+          padding-top:7px}
+
+  /* ---------- nút trên bản đồ ---------- */
+  .map-btns{position:absolute;right:12px;bottom:14px;z-index:500;
+            display:flex;flex-direction:column;gap:7px;align-items:center}
+  .mbtn{width:32px;height:32px;border-radius:50%;background:#fff;border:1px solid var(--line);
+    box-shadow:var(--shadow);cursor:pointer;display:grid;place-items:center;
+    font-size:14px;color:var(--ink-2)}
+  .mbtn:hover{color:var(--emerald-d)}
+  .zoomgrp{display:flex;flex-direction:column;background:#fff;border:1px solid var(--line);
+    border-radius:6px;box-shadow:var(--shadow);overflow:hidden}
+  .zoomgrp button{width:32px;height:30px;background:#fff;border:0;cursor:pointer;
+    font-size:15px;color:var(--ink-2)}
+  .zoomgrp button+button{border-top:1px solid var(--line)}
+  .zoomgrp button:hover{background:#f3f6f7}
+
+  /* ---------- thông báo trạng thái / lỗi DÍNH ---------- */
+  .statusbar{position:absolute;left:12px;bottom:14px;z-index:600;max-width:min(560px,60%)}
+  .statusbar .box{background:#fff;border-radius:7px;box-shadow:var(--shadow);
+    padding:8px 11px;font-size:12.2px;color:var(--ink-2);
+    border-left:4px solid var(--emerald)}
+  .statusbar .box.err{border-left-color:#ef4444;background:#fff5f5;color:#991b1b}
+  .statusbar .box code{background:rgba(0,0,0,.06);border-radius:3px;padding:0 4px;
+    font:11.5px ui-monospace,monospace}
+  .statusbar[hidden]{display:none}
+  button[disabled]{opacity:.5;cursor:not-allowed}
+
+  /* ---------- hẹp màn hình: panel xếp dọc, thôi nổi ---------- */
+  @media (max-width:1180px){
+    .left-dock{width:290px} .right-dock{width:242px}
+  }
+  @media (max-width:900px){
+    .sidebar{display:none}
+    .left-dock,.right-dock{position:static;width:auto;max-height:none}
+    .stage{display:flex;flex-direction:column;overflow:auto}
+    #map{position:relative;inset:auto;height:50vh;flex:0 0 auto;order:-1}
+    .map-btns,.statusbar{position:static;max-width:none;margin:10px 12px}
+  }
+</style>
+</head>
+<body>
+
+<!-- ======================= SIDEBAR (tĩnh, không hoạt động) ======================= -->
+<nav class="sidebar">
+  <div class="brand">
+    <div class="logo">💧</div>
+    <div><b>PAM CEMS</b><small>Vận hành bởi dlcorp</small></div>
+  </div>
+  <div class="nav">
+    <a href="#"><span class="ic">🏠</span>Trang chủ</a>
+    <a href="#"><span class="ic">📋</span>Danh mục</a>
+
+    <div class="nav-sec">Giám sát</div>
+    <div class="grp-h"><span class="ic">📡</span>Giám sát<span class="caret">▾</span></div>
+    <a href="#" class="sub">Tổng quan</a>
+    <a href="#" class="sub on">Bản đồ</a>
+    <a href="#" class="sub">Giám sát</a>
+    <a href="#" class="sub">Công trình</a>
+
+    <div class="nav-sec">Khai thác</div>
+    <div class="grp-h"><span class="ic">⚙️</span>Khai thác<span class="caret">▾</span></div>
+    <a href="#" class="sub">Vận hành hồ</a>
+    <a href="#" class="sub">Kế hoạch tưới</a>
+
+    <div class="nav-sec">Hệ thống</div>
+    <a href="#"><span class="ic">📑</span>Báo cáo</a>
+    <a href="#"><span class="ic">🔔</span>Cảnh báo</a>
+    <a href="#"><span class="ic">🛠️</span>Cấu hình</a>
+  </div>
+  <div class="side-foot">dlcorp · bản vỏ giao diện</div>
+</nav>
+
+<!-- ======================= KHUNG GIỮA ======================= -->
+<div class="main">
+  <header class="topbar">
+    <div class="crumb"><span>🏠</span><span>›</span><b>Bản đồ</b></div>
+    <span class="spacer"></span>
+    <span class="pill">72h</span>
+    <div class="who">admin_khanhhoa<div class="ava">A</div></div>
+  </header>
+
+  <div class="stage">
+    <div id="map" role="application" aria-label="Bản đồ hồ chứa Khánh Hoà"></div>
+
+    <!-- ============ PANEL TRÁI: Lớp dữ liệu ============ -->
+    <div class="left-dock">
+      <section class="panel" id="panel-layers">
+        <div class="p-head">
+          <h2>Lớp dữ liệu</h2>
+          <button class="collapse" data-collapse="panel-layers"
+                  aria-expanded="true" aria-label="Thu gọn panel Lớp dữ liệu">−</button>
+        </div>
+        <div class="p-body" style="padding:0">
+          <div class="tabs" role="tablist">
+            <button role="tab" aria-selected="true"  data-tab="tab-ho">Hồ chứa</button>
+            <button role="tab" aria-selected="false" data-tab="tab-gs">Giám sát</button>
+            <button role="tab" aria-selected="false" data-tab="tab-tb">Thông báo</button>
+          </div>
+
+          <!-- ---- Tab Hồ chứa ---- -->
+          <div class="tabpane" id="tab-ho" role="tabpanel" style="padding:10px 11px">
+            <label class="sw-row"><span class="t">Hiển thị điểm hồ</span>
+              <input class="sw" type="checkbox" id="sw-ho" checked></label>
+            <label class="sw-row"><span class="t">Gộp cụm hồ</span>
+              <input class="sw" type="checkbox" id="sw-ho-cluster"></label>
+            <label class="sw-row"><span class="t">Hiển thị điểm mưa</span>
+              <input class="sw" type="checkbox" id="sw-mua" checked></label>
+            <label class="sw-row"><span class="t">Gộp cụm mưa</span>
+              <input class="sw" type="checkbox" id="sw-mua-cluster"></label>
+
+            <div class="hr"></div>
+            <p class="sect-t">Tổng quan</p>
+            <div id="overview"></div>
+
+            <div class="hr"></div>
+            <p class="sect-t">Chi tiết</p>
+            <input class="search" id="q-ho" type="search"
+                   placeholder="Tìm theo tên hồ…" autocomplete="off" />
+            <div class="tw" style="margin-top:8px">
+              <table class="det">
+                <thead><tr>
+                  <th>Hồ</th><th>Dung tích<br>(triệu m³)</th><th>Mực nước<br>(m)</th>
+                  <th>LL đến<br>(m³/s)</th><th>LL xả<br>(m³/s)</th><th>Trạng thái</th>
+                </tr></thead>
+                <tbody id="tb-ho"></tbody>
+              </table>
+            </div>
+            <p class="hint">Số liệu mẫu tĩnh — chưa nối nguồn quan trắc.</p>
+          </div>
+
+          <!-- ---- Tab Giám sát ---- -->
+          <div class="tabpane" id="tab-gs" role="tabpanel" hidden style="padding:10px 11px">
+            <input class="search" id="q-gs" type="search"
+                   placeholder="Tìm theo tên, thông số…" autocomplete="off" />
+            <label class="opt" style="margin-top:7px">
+              <input class="chk" type="checkbox" id="chk-ts">
+              <span>Hiển thị điểm Timeseries thay cho Trạm</span></label>
+            <div class="hr"></div>
+            <div id="gs-groups"></div>
+            <p class="hint">Số liệu mẫu tĩnh — chưa nối nguồn quan trắc.</p>
+          </div>
+
+          <!-- ---- Tab Thông báo ---- -->
+          <div class="tabpane" id="tab-tb" role="tabpanel" hidden style="padding:10px 11px">
+            <div id="tb-list"></div>
+            <p class="hint">Thông báo mẫu tĩnh.</p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ============ CỤM PANEL PHẢI ============ -->
+    <div class="right-dock">
+
+      <section class="panel collapsed" id="panel-legend">
+        <div class="p-head">
+          <h2>Chú giải</h2>
+          <button class="collapse" data-collapse="panel-legend"
+                  aria-expanded="false" aria-label="Mở panel Chú giải">+</button>
+        </div>
+        <div class="p-body">
+          <p class="sect-t" style="margin-top:0">Mưa</p>
+          <div id="legendBody"></div>
+          <!-- Ghi công bắt buộc khi bật lớp dự báo — brief mục "Quy tắc bắt buộc" -->
+          <p class="credit" id="legendCredit" hidden>
+            Lớp <b>Dự báo mưa 24h</b>: số mô hình dự báo, không phải số đo trạm.<br>
+            Nguồn: Open-Meteo · CC-BY 4.0
+          </p>
+          <div id="legendExtra"></div>
+        </div>
+      </section>
+
+      <section class="panel collapsed" id="panel-base">
+        <div class="p-head">
+          <h2>Bản đồ nền</h2>
+          <button class="collapse" data-collapse="panel-base"
+                  aria-expanded="false" aria-label="Mở panel Bản đồ nền">+</button>
+        </div>
+        <div class="p-body">
+          <label class="opt"><input class="rad" type="radio" name="basemap" value="basic" checked>
+            <span>Bản đồ cơ bản</span></label>
+          <label class="opt"><input class="rad" type="radio" name="basemap" value="terrain">
+            <span>Bản đồ độ cao</span></label>
+          <label class="opt"><input class="rad" type="radio" name="basemap" value="satellite">
+            <span>Vệ tinh</span></label>
+          <label class="opt"><input class="rad" type="radio" name="basemap" value="satellite-labels">
+            <span>Vệ tinh &amp; Lớp dữ liệu</span></label>
+          <div class="hr"></div>
+          <label class="sw-row"><span class="t">Hiển thị tên điểm</span>
+            <input class="sw" type="checkbox" id="sw-labels" checked></label>
+        </div>
+      </section>
+
+      <section class="panel collapsed" id="panel-other">
+        <div class="p-head">
+          <h2>Lớp dữ liệu khác</h2>
+          <button class="collapse" data-collapse="panel-other"
+                  aria-expanded="false" aria-label="Mở panel Lớp dữ liệu khác">+</button>
+        </div>
+        <div class="p-body">
+          <label class="opt"><input class="chk" type="checkbox" data-layer="hydro">
+            <span>Thuỷ hệ</span></label>
+          <label class="opt"><input class="chk" type="checkbox" data-layer="reservoir">
+            <span>Hồ chứa</span></label>
+          <label class="opt"><input class="chk" type="checkbox" data-layer="admin" checked>
+            <span>Địa giới hành chính</span></label>
+          <div class="hr"></div>
+          <!-- Lớp dự báo là lớp MỚI, không thay thế marker quan trắc -->
+          <label class="opt"><input class="chk" type="checkbox" id="chk-forecast" data-layer="forecast-rain">
+            <span>Dự báo mưa 24h (Open-Meteo)</span></label>
+          <p class="hint" style="margin-top:4px">
+            Số mô hình dự báo, không phải số đo trạm. Marker dự báo vẽ viền nét đứt.
+          </p>
+        </div>
+      </section>
+    </div>
+
+    <!-- nút khít khung + zoom -->
+    <div class="map-btns">
+      <button class="mbtn" id="btn-fit" title="Khít khung Khánh Hoà" aria-label="Khít khung">⤢</button>
+      <div class="zoomgrp">
+        <button id="btn-zin"  title="Phóng to"  aria-label="Phóng to">+</button>
+        <button id="btn-zout" title="Thu nhỏ"   aria-label="Thu nhỏ">−</button>
+      </div>
+    </div>
+
+    <!-- dòng trạng thái / lỗi DÍNH (không tự ẩn khi là lỗi) -->
+    <div class="statusbar" id="statusbar" hidden><div class="box" id="statusbox"></div></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* ===========================================================================
+   CẤU HÌNH
+   =========================================================================== */
+
+// Đặt true để chạy thử bằng Leaflet + OpenStreetMap, KHÔNG cần khoá Google.
+const USE_LEAFLET = true;
+
+// ====== ĐIỀN KHOÁ GOOGLE MAPS Ở ĐÂY (chỉ cần khi USE_LEAFLET = false) ======
+const GOOGLE_MAPS_KEY = 'YOUR_GOOGLE_MAPS_API_KEY';
+// ===========================================================================
+
+// Khung Khánh Hoà sau sáp nhập (gồm phần Ninh Thuận cũ)
+const BBOX = { latMin: 11.30, latMax: 12.95, lonMin: 108.45, lonMax: 109.55 };
+
+/* ===========================================================================
+   DỮ LIỆU MẪU TĨNH — 7 hồ. KHÔNG gọi API.
+   Toạ độ và số liệu chỉ để dựng giao diện, phần tích hợp sẽ thay bằng số thật.
+   =========================================================================== */
+const RESERVOIRS = [
+  { code:'SUOIDAU',  name:'Hồ Suối Dầu',  lat:12.1500, lon:109.0400, cap:32.60, level:38.42, qin:4.10, qout:1.20, status:'ok'     },
+  { code:'CAMRANH',  name:'Hồ Cam Ranh',  lat:11.9600, lon:109.0100, cap:22.10, level:31.08, qin:2.60, qout:0.80, status:'ok'     },
+  { code:'DABAN',    name:'Hồ Đá Bàn',    lat:12.7600, lon:109.1300, cap:75.00, level:42.75, qin:9.40, qout:3.50, status:'w1'     },
+  { code:'HOASON',   name:'Hồ Hoa Sơn',   lat:12.7500, lon:109.2000, cap:19.40, level:28.60, qin:1.90, qout:0.40, status:'ok'     },
+  { code:'TARUC',    name:'Hồ Tà Rục',    lat:11.9100, lon:108.9500, cap:20.50, level:34.12, qin:3.20, qout:0.00, status:'nodata' },
+  { code:'SONGSAT',  name:'Hồ Sông Sắt',  lat:11.8200, lon:108.8300, cap:69.33, level:60.15, qin:11.80, qout:6.20, status:'w2'   },
+  { code:'TANGIANG', name:'Hồ Tân Giang', lat:11.6400, lon:108.7600, cap:13.39, level:49.90, qin:5.70, qout:2.10, status:'w3'    },
+];
+
+// Nhãn + màu trạng thái, theo bảng màu trong brief
+const STATUS = {
+  ok:     { label:'Bình thường',    color:'var(--st-ok)'     },
+  w1:     { label:'Cảnh báo cấp 1', color:'var(--st-w1)'     },
+  w2:     { label:'Cảnh báo cấp 2', color:'var(--st-w2)'     },
+  w3:     { label:'Cảnh báo cấp 3', color:'var(--st-w3)'     },
+  nodata: { label:'Mất dữ liệu',    color:'var(--st-nodata)' },
+};
+
+// Bậc mưa cho Chú giải — giữ ĐÚNG nhãn và màu như brief / rain-class.js
+const RAIN_LEGEND = [
+  { label:'Không mưa/ Mất dữ liệu',     color:'var(--rain-0)' },
+  { label:'Mưa nhỏ: < 16 (mm/24h)',     color:'var(--rain-1)' },
+  { label:'Mưa vừa: 16 - 50 (mm/24h)',  color:'var(--rain-2)' },
+  { label:'Mưa to: 51 - 100 (mm/24h)',  color:'var(--rain-3)' },
+  { label:'Mưa rất to: > 100 (mm/24h)', color:'var(--rain-4)' },
+];
+
+// Nhóm thông số mẫu cho tab "Giám sát"
+const MONITOR_GROUPS = [
+  { name:'Mưa Khánh Hoà', open:true, rows:[
+    { ic:'🌧', name:'Mưa 1h — Nha Trang',     unit:'mm',  v:'0.4'  },
+    { ic:'🌧', name:'Mưa 24h — Nha Trang',    unit:'mm',  v:'18.6' },
+    { ic:'🌧', name:'Mưa 24h — Ninh Hoà',     unit:'mm',  v:'54.2' },
+    { ic:'🌧', name:'Mưa 24h — Cam Ranh',     unit:'mm',  v:'7.1'  },
+  ]},
+  { name:'HỒ ĐÁ BÀN', open:false, rows:[
+    { ic:'📏', name:'Mực nước hồ',  unit:'m',     v:'42.75' },
+    { ic:'➡️', name:'Lưu lượng đến', unit:'m³/s', v:'9.40'  },
+    { ic:'⬅️', name:'Lưu lượng xả',  unit:'m³/s', v:'3.50'  },
+  ]},
+  { name:'HỒ SÔNG SẮT', open:false, rows:[
+    { ic:'📏', name:'Mực nước hồ',  unit:'m',     v:'60.15' },
+    { ic:'➡️', name:'Lưu lượng đến', unit:'m³/s', v:'11.80' },
+    { ic:'⬅️', name:'Lưu lượng xả',  unit:'m³/s', v:'6.20'  },
+  ]},
+  { name:'HỒ TÂN GIANG', open:false, rows:[
+    { ic:'📏', name:'Mực nước hồ',  unit:'m',     v:'49.90' },
+    { ic:'🌡', name:'Nhiệt độ nước', unit:'°C',   v:'27.3'  },
+  ]},
+];
+
+// Thông báo mẫu cho tab "Thông báo"
+const NOTICES = [
+  { name:'Hồ Tân Giang', over:true,  desc:'Mực nước vượt MNDBT 0,35 m. Đề nghị kiểm tra phương án xả.', at:'29/10/2026 06:15' },
+  { name:'Hồ Sông Sắt',  over:true,  desc:'Lưu lượng đến tăng nhanh 11,8 m³/s trong 3 giờ.',            at:'29/10/2026 05:40' },
+  { name:'Hồ Đá Bàn',    over:false, desc:'Mưa 24h đạt 54,2 mm — theo dõi cấp cảnh báo 1.',             at:'29/10/2026 04:02' },
+  { name:'Hồ Tà Rục',    over:false, desc:'Mất tín hiệu cảm biến mực nước hơn 60 phút.',                at:'28/10/2026 23:11' },
+];
+
+/* ===========================================================================
+   DỰNG NỘI DUNG TĨNH
+   =========================================================================== */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+
+/* -- Tổng quan: đếm theo trạng thái -- */
+function renderOverview() {
+  const count = (k) => RESERVOIRS.filter((r) => r.status === k).length;
+  const rows = [
+    { label:'Tổng số',        color:'var(--st-total)',  n:RESERVOIRS.length },
+    { label:'Bình thường',    color:'var(--st-ok)',     n:count('ok')     },
+    { label:'Cảnh báo cấp 1', color:'var(--st-w1)',     n:count('w1')     },
+    { label:'Cảnh báo cấp 2', color:'var(--st-w2)',     n:count('w2')     },
+    { label:'Cảnh báo cấp 3', color:'var(--st-w3)',     n:count('w3')     },
+    { label:'Mất dữ liệu',    color:'var(--st-nodata)', n:count('nodata') },
+  ];
+  $('overview').innerHTML = rows.map((r) => `
+    <div class="stat-row">
+      <span class="dot" style="background:${r.color}"></span>
+      <span>${esc(r.label)}</span><span class="n">${r.n}</span>
+    </div>`).join('');
+}
+
+/* -- Bảng chi tiết, có lọc theo ô tìm kiếm -- */
+function renderTable(filter = '') {
+  const q = filter.trim().toLowerCase();
+  const list = q ? RESERVOIRS.filter((r) => r.name.toLowerCase().includes(q)) : RESERVOIRS;
+  $('tb-ho').innerHTML = list.length ? list.map((r) => {
+    const st = STATUS[r.status];
+    return `<tr>
+      <td>${esc(r.name)}</td>
+      <td class="cap">${r.cap.toFixed(2)}</td>
+      <td class="lvl">${r.level.toFixed(2)}</td>
+      <td class="qin">${r.qin.toFixed(2)}</td>
+      <td class="qout">${r.qout.toFixed(2)}</td>
+      <td class="st" style="color:${st.color}">${esc(st.label)}</td>
+    </tr>`;
+  }).join('')
+    : `<tr><td colspan="6" style="text-align:center;color:var(--muted)">Không có hồ nào khớp.</td></tr>`;
+}
+
+/* -- Tab Giám sát: các nhóm thu gọn được, có lọc -- */
+function renderMonitor(filter = '') {
+  const q = filter.trim().toLowerCase();
+  const html = MONITOR_GROUPS.map((g) => {
+    const rows = q
+      ? g.rows.filter((r) => (r.name + ' ' + r.unit).toLowerCase().includes(q))
+      : g.rows;
+    if (q && !rows.length && !g.name.toLowerCase().includes(q)) return '';
+    return `<details class="grp" ${(g.open || q) ? 'open' : ''}>
+      <summary>${esc(g.name)}<span class="caret">▾</span></summary>
+      ${rows.map((r) => `<div class="par">
+          <span class="ic">${r.ic}</span>
+          <span class="nm">${esc(r.name)} (${esc(r.unit)})</span>
+          <span class="v">${esc(r.v)}</span>
+        </div>`).join('')}
+    </details>`;
+  }).join('');
+  $('gs-groups').innerHTML = html ||
+    `<p class="hint">Không có thông số nào khớp.</p>`;
+}
+
+/* -- Tab Thông báo -- */
+function renderNotices() {
+  $('tb-list').innerHTML = NOTICES.map((n) => `
+    <article class="card">
+      <div class="ttl"><b>${esc(n.name)}</b>
+        ${n.over ? '<span class="badge">Vượt ngưỡng</span>' : ''}</div>
+      <p>${esc(n.desc)}</p><time>${esc(n.at)}</time>
+    </article>`).join('');
+}
+
+/* -- Chú giải: icon GIỌT NƯỚC tô màu theo bậc, chữ cùng màu -- */
+function dropSvg(color) {
+  // giọt nước đơn giản bằng SVG — không có FontAwesome Pro nên tự vẽ
+  return `<svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M12 2.5c3.6 4.6 6.5 8 6.5 11.6A6.5 6.5 0 0 1 12 21a6.5 6.5 0 0 1-6.5-6.9C5.5 10.5 8.4 7.1 12 2.5z"
+          fill="${color}" stroke="rgba(0,0,0,.18)" stroke-width="0.8"/></svg>`;
+}
+function renderLegend() {
+  $('legendBody').innerHTML = RAIN_LEGEND.map((r) => `
+    <div class="lg-row" style="color:${r.color}">
+      ${dropSvg(r.color)}<span>${esc(r.label)}</span>
+    </div>`).join('');
+}
+
+renderOverview(); renderTable(); renderMonitor(); renderNotices(); renderLegend();
+
+/* ===========================================================================
+   HÀNH VI PANEL: thu gọn + chuyển tab
+   =========================================================================== */
+document.querySelectorAll('.collapse').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const panel = $(btn.dataset.collapse);
+    const nowCollapsed = panel.classList.toggle('collapsed');
+    btn.textContent = nowCollapsed ? '+' : '−';
+    btn.setAttribute('aria-expanded', String(!nowCollapsed));
+    btn.setAttribute('aria-label',
+      (nowCollapsed ? 'Mở ' : 'Thu gọn ') + 'panel ' + panel.querySelector('h2').textContent);
+  });
+});
+
+document.querySelectorAll('.tabs button').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach((t) => {
+      const on = t === tab;
+      t.setAttribute('aria-selected', String(on));
+      $(t.dataset.tab).hidden = !on;
+    });
+  });
+});
+
+$('q-ho').addEventListener('input', (e) => renderTable(e.target.value));
+$('q-gs').addEventListener('input', (e) => renderMonitor(e.target.value));
+
+/* ===========================================================================
+   TRẠNG THÁI / LỖI — không bao giờ hỏng âm thầm
+   =========================================================================== */
+let stickyError = false;   // lỗi dính: không cho thông báo thường ghi đè
+
+function setStatus(text, isError = false) {
+  if (stickyError && !isError) return;   // giữ nguyên lỗi đang hiện
+  if (isError) stickyError = true;
+  $('statusbar').hidden = false;
+  $('statusbox').className = 'box' + (isError ? ' err' : '');
+  $('statusbox').innerHTML = text;
+}
+function clearStatus() {
+  if (stickyError) return;
+  $('statusbar').hidden = true;
+}
+
+/** Khoá mọi nút điều khiển bản đồ khi không có bản đồ nền. */
+function lockMapControls(locked) {
+  ['btn-fit', 'btn-zin', 'btn-zout'].forEach((id) => { $(id).disabled = locked; });
+  $('chk-forecast').disabled = locked;
+}
+
+/**
+ * Lỗi ở mức một lớp dữ liệu: hiện thông báo DÍNH nhưng KHÔNG khoá bản đồ,
+ * vì bản đồ nền vẫn chạy bình thường.
+ */
+function layerError(html) {
+  stickyError = false;          // cho lỗi mới ghi đè lỗi cũ
+  setStatus(html, true);
+}
+
+/** Lỗi nghiêm trọng (không có bản đồ nền): khoá nút + hiện thông báo dính. */
+function fatal(html) {
+  mapReady = false;
+  lockMapControls(true);
+  stickyError = false;          // cho phép ghi đè bằng chính lỗi này
+  setStatus(html, true);
+}
+
+lockMapControls(true);           // mặc định khoá, mở khi bản đồ sẵn sàng
+
+/* ===========================================================================
+   NẠP BẢN ĐỒ — Google Maps (cần khoá) hoặc Leaflet (không cần)
+   =========================================================================== */
+let map = null, engine = null, mapReady = false;
+const readyCbs = [];
+
+function fireReady() {
+  mapReady = true;
+  lockMapControls(false);
+  readyCbs.splice(0).forEach((fn) => { try { fn(map, engine); } catch (e) { console.error(e); } });
+}
+
+/* ---- Leaflet ---- */
+// Bốn kiểu nền khớp bốn radio trong panel "Bản đồ nền".
+const LEAFLET_BASES = {
+  basic: { url:'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', max:19,
+           attr:'&copy; OpenStreetMap' },
+  terrain: { url:'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', max:17,
+             attr:'&copy; OpenTopoMap · OpenStreetMap' },
+  satellite: { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', max:19,
+               attr:'Esri World Imagery' },
+  'satellite-labels': { url:'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', max:19,
+               attr:'Esri World Imagery', labels:true },
+};
+let lBase = null, lLabels = null;
+
+function leafletSetBase(id) {
+  const cfg = LEAFLET_BASES[id] || LEAFLET_BASES.basic;
+  if (lBase) map.removeLayer(lBase);
+  lBase = L.tileLayer(cfg.url, { maxZoom: cfg.max, attribution: cfg.attr }).addTo(map);
+  lBase.bringToBack();
+  if (lLabels) { map.removeLayer(lLabels); lLabels = null; }
+  if (cfg.labels) {
+    // lớp nhãn trong suốt phủ lên ảnh vệ tinh — tương đương "Vệ tinh & Lớp dữ liệu"
+    lLabels = L.tileLayer(
+      'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',
+      { maxZoom: 19, attribution: '&copy; CARTO' }).addTo(map);
+  }
+}
+
+function initLeaflet() {
+  if (typeof L === 'undefined') {
+    throw new Error('Không nạp được thư viện Leaflet từ unpkg.com — kiểm tra kết nối mạng.');
+  }
+  engine = 'leaflet';
+  map = L.map('map', { zoomControl: false, attributionControl: true })
+         .fitBounds([[BBOX.latMin, BBOX.lonMin], [BBOX.latMax, BBOX.lonMax]]);
+  leafletSetBase('basic');
+  drawSampleMarkers();
+  fireReady();
+  setStatus('Đang chạy nền <b>Leaflet / OpenStreetMap</b> (cờ <code>USE_LEAFLET = true</code>) — ' +
+            'không cần khoá Google Maps. Dữ liệu trong panel là mẫu tĩnh.');
+}
+
+/* ---- Google Maps ---- */
+const GOOGLE_TYPES = { basic:'roadmap', terrain:'terrain', satellite:'satellite',
+                       'satellite-labels':'hybrid' };
+
+function loadGoogle() {
+  return new Promise((res, rej) => {
+    if (!GOOGLE_MAPS_KEY || GOOGLE_MAPS_KEY.startsWith('YOUR_')) {
+      return rej(new Error(
+        'Chưa điền <code>GOOGLE_MAPS_KEY</code> trong <code>web/khanhhoa.html</code>. ' +
+        'Để chạy thử ngay mà không cần khoá, đặt <code>USE_LEAFLET = true</code> trong cùng file.'));
+    }
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_KEY)}&v=weekly`;
+    s.onload = res;
+    s.onerror = () => rej(new Error(
+      'Không nạp được Google Maps — kiểm tra khoá và giới hạn HTTP referrer. ' +
+      'Hoặc đặt <code>USE_LEAFLET = true</code> để dùng nền Leaflet.'));
+    document.head.appendChild(s);
+  });
+}
+
+async function initGoogle() {
+  setStatus('Đang nạp Google Maps…');
+  await loadGoogle();
+  engine = 'google';
+  map = new google.maps.Map($('map'), {
+    center: { lat:(BBOX.latMin + BBOX.latMax) / 2, lng:(BBOX.lonMin + BBOX.lonMax) / 2 },
+    zoom: 9, mapTypeId: 'roadmap', tilt: 0,
+    streetViewControl: false, fullscreenControl: false,
+    mapTypeControl: false, zoomControl: false,
+  });
+  drawSampleMarkers();
+  fireReady();
+  setStatus('Bản đồ Google đã sẵn sàng. Dữ liệu trong panel là mẫu tĩnh.');
+}
+
+/* ---- marker hồ mẫu (nét LIỀN: đây là điểm công trình, không phải dự báo) ---- */
+let sampleMarkers = [], showLabels = true;
+
+function statusColorHex(k) {
+  return { ok:'#22c55e', w1:'#f97316', w2:'#ef4444', w3:'#a855f7', nodata:'#111827' }[k];
+}
+
+function drawSampleMarkers() {
+  sampleMarkers = [];
+  for (const r of RESERVOIRS) {
+    const col = statusColorHex(r.status);
+    if (engine === 'leaflet') {
+      const html = `<div style="position:relative;transform:translate(-50%,-100%)">
+        <svg width="26" height="34" viewBox="0 0 24 32">
+          <path d="M12 0.8c6.2 0 11.2 5 11.2 11.2 0 7.6-11.2 19.2-11.2 19.2S0.8 19.6 0.8 12C0.8 5.8 5.8 0.8 12 0.8z"
+                fill="#fff" stroke="${col}" stroke-width="2.2"/>
+          <text x="12" y="17" text-anchor="middle" font-size="11">💧</text>
+        </svg>
+        <span style="position:absolute;right:-1px;top:-1px;width:9px;height:9px;border-radius:50%;
+                     background:${col};border:1.5px solid #fff"></span>
+        <div class="pam-lbl" style="position:absolute;left:50%;top:34px;transform:translateX(-50%);
+             white-space:nowrap;font:600 10.5px 'Be Vietnam Pro',system-ui;color:#13303f;
+             background:rgba(255,255,255,.88);border-radius:3px;padding:0 3px;
+             display:${showLabels ? 'block' : 'none'}">${esc(r.name)}</div></div>`;
+      const m = L.marker([r.lat, r.lon], {
+        icon: L.divIcon({ html, className:'', iconSize:[26, 34], iconAnchor:[0, 0] }),
+      }).addTo(map);
+      m.bindPopup(popupHtml(r));
+      sampleMarkers.push(m);
+    } else {
+      const m = new google.maps.Marker({
+        map, position:{ lat:r.lat, lng:r.lon },
+        title: `${r.name} — ${STATUS[r.status].label}`,
+        label: showLabels ? { text:r.name, fontSize:'10.5px', fontWeight:'600', className:'' } : null,
+        icon: { path: google.maps.SymbolPath.CIRCLE, scale:10, fillColor:'#ffffff',
+                fillOpacity:1, strokeColor:col, strokeWeight:3 },
+      });
+      const info = new google.maps.InfoWindow({ content: popupHtml(r) });
+      m.addListener('click', () => info.open({ map, anchor:m }));
+      sampleMarkers.push(m);
+    }
+  }
+}
+
+function popupHtml(r) {
+  const st = STATUS[r.status];
+  return `<div style="font:12.5px 'Be Vietnam Pro',system-ui;min-width:198px;color:#111827">
+    <div style="background:#10b981;color:#fff;margin:-1px -1px 7px;padding:6px 9px;
+                font-weight:600;border-radius:4px 4px 0 0">${esc(r.name)}</div>
+    <div>Dung tích: <b>${r.cap.toFixed(2)}</b> triệu m³</div>
+    <div>Mực nước: <b>${r.level.toFixed(2)}</b> m</div>
+    <div>LL đến / xả: <b>${r.qin.toFixed(2)}</b> / <b>${r.qout.toFixed(2)}</b> m³/s</div>
+    <div style="margin-top:4px">Trạng thái:
+      <b style="color:${st.color.replace('var(--st-ok)','#22c55e')}">${esc(st.label)}</b></div>
+    <div style="color:#6b7280;font-size:10.5px;margin-top:5px">Số liệu mẫu tĩnh</div>
+  </div>`;
+}
+
+function applyLabels(on) {
+  showLabels = on;
+  if (!mapReady) return;
+  if (engine === 'leaflet') {
+    document.querySelectorAll('.pam-lbl').forEach((el) => { el.style.display = on ? 'block' : 'none'; });
+  } else {
+    sampleMarkers.forEach((m, i) => m.setLabel(
+      on ? { text: RESERVOIRS[i].name, fontSize:'10.5px', fontWeight:'600' } : null));
+  }
+}
+
+/* ===========================================================================
+   NÚT ĐIỀU KHIỂN BẢN ĐỒ
+   =========================================================================== */
+function fitBbox() {
+  if (!mapReady) return;
+  if (engine === 'leaflet') map.fitBounds([[BBOX.latMin, BBOX.lonMin], [BBOX.latMax, BBOX.lonMax]]);
+  else map.fitBounds(new google.maps.LatLngBounds(
+    { lat:BBOX.latMin, lng:BBOX.lonMin }, { lat:BBOX.latMax, lng:BBOX.lonMax }));
+}
+function zoomBy(d) {
+  if (!mapReady) return;
+  if (engine === 'leaflet') map.setZoom(map.getZoom() + d);
+  else map.setZoom(map.getZoom() + d);
+}
+$('btn-fit').addEventListener('click', fitBbox);
+$('btn-zin').addEventListener('click', () => zoomBy(1));
+$('btn-zout').addEventListener('click', () => zoomBy(-1));
+
+/* ===========================================================================
+   PANEL PHẢI -> bản đồ
+   =========================================================================== */
+const basemapCbs = [], layerCbs = [], labelCbs = [];
+
+document.querySelectorAll('input[name=basemap]').forEach((r) => {
+  r.addEventListener('change', () => {
+    if (!r.checked) return;
+    const id = r.value;
+    if (mapReady) {
+      if (engine === 'leaflet') leafletSetBase(id);
+      else map.setMapTypeId(GOOGLE_TYPES[id] || 'roadmap');
+    }
+    basemapCbs.forEach((fn) => { try { fn(id); } catch (e) { console.error(e); } });
+  });
+});
+
+$('sw-labels').addEventListener('change', (e) => {
+  applyLabels(e.target.checked);
+  labelCbs.forEach((fn) => { try { fn(e.target.checked); } catch (err) { console.error(err); } });
+});
+
+$('sw-ho').addEventListener('change', (e) => {
+  // Toggle hiển thị marker hồ — phần vỏ đã làm được việc này với dữ liệu mẫu
+  if (!mapReady) return;
+  const on = e.target.checked;
+  sampleMarkers.forEach((m) => {
+    if (engine === 'leaflet') on ? m.addTo(map) : map.removeLayer(m);
+    else m.setMap(on ? map : null);
+  });
+});
+
+/* ---- lớp dự báo: vỏ giữ chỗ, phần tích hợp cắm bộ dựng vào ---- */
+let forecastBuilder = null, forecastLayer = null, forecastBusy = false;
+
+function clearForecastLayer() {
+  if (forecastLayer && typeof forecastLayer.setMap === 'function') {
+    try { forecastLayer.setMap(null); } catch (e) { console.error(e); }
+  }
+  forecastLayer = null;
+}
+
+async function refreshForecast() {
+  const want = $('chk-forecast').checked;
+  clearForecastLayer();
+  // Chú giải phải ghi công CC-BY 4.0 ngay khi lớp dự báo được bật
+  $('legendCredit').hidden = !want;
+  // Tắt lớp cũng là cách người dùng "xác nhận đã đọc" lỗi của lớp đó
+  if (!want) { stickyError = false; clearStatus(); return; }
+
+  if (!mapReady) {
+    $('chk-forecast').checked = false;
+    fatal('Chưa có bản đồ nền nên không vẽ được lớp dự báo.');
+    return;
+  }
+  if (!forecastBuilder) {
+    // KHÔNG im lặng: bật lớp mà không có gì xảy ra thì người dùng tưởng app hỏng
+    setStatus('Lớp <b>Dự báo mưa 24h (Open-Meteo)</b> chưa được nối dữ liệu. ' +
+      'Phần tích hợp cần gọi <code>window.__pam.setForecastLayer(fn)</code>. ' +
+      'Vỏ giao diện không tự gọi API.');
+    return;
+  }
+  if (forecastBusy) return;
+  forecastBusy = true;
+  setStatus('Đang dựng lớp dự báo mưa 24h…');
+  try {
+    forecastLayer = await forecastBuilder(map, { visible:true, engine });
+    setStatus('Đã bật lớp dự báo mưa 24h. <b>Số mô hình dự báo, không phải số đo trạm.</b>');
+  } catch (e) {
+    $('chk-forecast').checked = false;
+    $('legendCredit').hidden = true;
+    clearForecastLayer();
+    layerError('Không dựng được lớp dự báo: ' + esc(e && e.message ? e.message : String(e)));
+  } finally {
+    forecastBusy = false;
+  }
+}
+
+document.querySelectorAll('input[data-layer]').forEach((c) => {
+  c.addEventListener('change', () => {
+    const id = c.dataset.layer;
+    if (id === 'forecast-rain') refreshForecast();
+    layerCbs.forEach((fn) => { try { fn(id, c.checked); } catch (e) { console.error(e); } });
+  });
+});
+
+/* ===========================================================================
+   HỢP ĐỒNG window.__pam (xem bình luận đầu file)
+   =========================================================================== */
+window.__pam = {
+  get map() { return map; },
+  get engine() { return engine; },
+  get ready() { return mapReady; },
+  onReady(fn) {
+    if (mapReady) { fn(map, engine); return () => {}; }
+    readyCbs.push(fn);
+    return () => { const i = readyCbs.indexOf(fn); if (i >= 0) readyCbs.splice(i, 1); };
+  },
+  bbox: BBOX,
+  reservoirs: RESERVOIRS,
+
+  setForecastLayer(fn) {
+    if (typeof fn !== 'function') throw new TypeError('setForecastLayer cần một hàm');
+    forecastBuilder = fn;
+    if ($('chk-forecast').checked) refreshForecast();
+  },
+  refreshForecast,
+  isForecastOn: () => $('chk-forecast').checked,
+
+  setStatus,
+  setLegendExtra(html) { $('legendExtra').innerHTML = html; },
+  onBasemapChange(fn) { basemapCbs.push(fn); },
+  onLayerToggle(fn) { layerCbs.push(fn); },
+  onLabelsToggle(fn) { labelCbs.push(fn); },
+};
+
+/* ===========================================================================
+   KHỞI ĐỘNG
+   =========================================================================== */
+(async () => {
+  try {
+    if (USE_LEAFLET) initLeaflet();
+    else await initGoogle();
+  } catch (e) {
+    fatal((e && e.message ? e.message : String(e)) +
+      '<br><span style="opacity:.8">Mọi nút điều khiển bản đồ đã bị khoá để không hỏng âm thầm.</span>');
+  }
+})();
+</script>
+<script type="module" src="./khanhhoa-tich-hop.js?v=202610291500"></script>
+</body>
+</html>
